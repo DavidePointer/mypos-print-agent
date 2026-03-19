@@ -1,0 +1,56 @@
+{
+  "name": "mypos-print-agent",
+  "version": "1.0.0",
+  "description": "MyPos Print Agent - Stampa comande ESC/POS",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder --win --x64",
+    "build-portable": "electron-builder --win portable --x64"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "sharp": "^0.33.5",
+    "electron-updater": "^6.1.7"
+  },
+  "devDependencies": {
+    "electron": "^28.0.0",
+    "electron-builder": "^24.9.1"
+  },
+  "build": {
+    "appId": "it.pointer.mypos-print-agent",
+    "productName": "MyPos Print Agent",
+    "copyright": "© 2025 Pointer S.r.l.",
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "DavidePointer",
+        "repo": "mypos-print-agent",
+        "releaseType": "release"
+      }
+    ],
+    "win": {
+      "target": [
+        { "target": "nsis", "arch": ["x64"] }
+      ],
+      "icon": "assets/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": false,
+      "installerIcon": "assets/icon.ico",
+      "uninstallerIcon": "assets/icon.ico",
+      "installerHeaderIcon": "assets/icon.ico",
+      "createDesktopShortcut": false,
+      "createStartMenuShortcut": true,
+      "shortcutName": "MyPos Print Agent",
+      "runAfterFinish": true
+    },
+    "files": [
+      "src/**/*",
+      "assets/**/*",
+      "node_modules/**/*"
+    ],
+    "asar": true
+  }
+}
