@@ -49,7 +49,7 @@ app.on("before-quit", () => {
 function createTray() {
   const icon = nativeImage.createFromPath(getIconPath());
   tray = new Tray(icon.resize({ width: 16, height: 16 }));
-  tray.setToolTip("MyPos Print Agent");
+  tray.setToolTip("Comandan Print Agent");
   updateTrayMenu();
   tray.on("double-click", () => openStatusWindow());
 }
@@ -61,7 +61,7 @@ function updateTrayMenu() {
   const { printCount } = getStatus();
 
   const template = [
-    { label: "MyPos Print Agent", enabled: false },
+    { label: "Comandan Print Agent", enabled: false },
     { type: "separator" },
     { label: statusLabel, enabled: false },
     { label: `Stampe oggi: ${printCount}`, enabled: false },
@@ -112,7 +112,7 @@ function openStatusWindow() {
     resizable: false,
     minimizable: false,
     maximizable: false,
-    title: "MyPos Print Agent",
+    title: "Comandan Print Agent",
     icon: getIconPath(),
     webPreferences: {
       nodeIntegration: true,

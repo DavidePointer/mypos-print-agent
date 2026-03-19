@@ -1,7 +1,7 @@
 {
-  "name": "mypos-print-agent",
-  "version": "1.0.0",
-  "description": "MyPos Print Agent - Stampa comande ESC/POS",
+  "name": "comandan-print-agent",
+  "version": "1.1.0",
+  "description": "Comandan Print Agent - Stampa comande ESC/POS",
   "main": "src/main.js",
   "scripts": {
     "start": "electron .",
@@ -18,9 +18,9 @@
     "electron-builder": "^24.9.1"
   },
   "build": {
-    "appId": "it.pointer.mypos-print-agent",
-    "productName": "MyPos Print Agent",
-    "copyright": "© 2025 Pointer S.r.l.",
+    "appId": "it.pointer.comandan-print-agent",
+    "productName": "Comandan Print Agent",
+    "copyright": "\u00a9 2025 Pointer S.r.l.",
     "publish": [
       {
         "provider": "github",
@@ -31,7 +31,12 @@
     ],
     "win": {
       "target": [
-        { "target": "nsis", "arch": ["x64"] }
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
       ],
       "icon": "assets/icon.ico"
     },
@@ -43,7 +48,7 @@
       "installerHeaderIcon": "assets/icon.ico",
       "createDesktopShortcut": false,
       "createStartMenuShortcut": true,
-      "shortcutName": "MyPos Print Agent",
+      "shortcutName": "Comandan Print Agent",
       "runAfterFinish": true
     },
     "files": [
