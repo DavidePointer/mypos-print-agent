@@ -1,6 +1,6 @@
 {
   "name": "comandan-print-agent",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Comandan Print Agent - Stampa comande ESC/POS",
   "main": "src/main.js",
   "scripts": {

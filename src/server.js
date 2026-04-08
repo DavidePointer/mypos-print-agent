@@ -1,6 +1,10 @@
-const express = require("express");
-const net = require("net");
-const sharp = require("sharp");
+const express    = require("express");
+const net        = require("net");
+const sharp      = require("sharp");
+const os         = require("os");
+const fs         = require("fs");
+const path       = require("path");
+const pollWorker = require("./pollWorker");
 
 const PORT = 8888;
 let server = null;
@@ -11,12 +15,57 @@ const status = {
   lastError: null,
 };
 
+// ── Config persistence (#161) ─────────────────────────────────────
+// Salva/carica credenziali Supabase su disco: il poll loop sopravvive
+// al riavvio del PC senza richiedere una nuova chiamata /configure.
+const CONFIG_PATH = path.join(
+  process.env.APPDATA || os.homedir(),
+  "ComandaPrintAgent",
+  "supabase-config.json"
+);
+
+function saveConfig(config) {
+  try {
+    fs.mkdirSync(path.dirname(CONFIG_PATH), { recursive: true });
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify(config), "utf8");
+  } catch (e) {
+    console.warn("[Config] Salvataggio fallito:", e.message);
+  }
+}
+
+function loadConfig() {
+  try {
+    if (!fs.existsSync(CONFIG_PATH)) return null;
+    return JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"));
+  } catch (e) {
+    console.warn("[Config] Caricamento fallito:", e.message);
+    return null;
+  }
+}
+
+function startPollLoop(config) {
+  pollWorker.start(config, (result) => {
+    if (result.success) status.printCount++;
+    status.lastPrint = new Date().toISOString();
+    if (!result.success) status.lastError = result.error;
+  });
+}
+
 const app = express();
 
+// ── CORS + Private Network Access ─────────────────────────────────────────────
+// Da Chrome 94+ la specifica "Private Network Access" aggiunge un preflight
+// OPTIONS con header `Access-Control-Request-Private-Network: true`.
+// Il server DEVE rispondere con `Access-Control-Allow-Private-Network: true`,
+// altrimenti Chrome blocca ogni fetch da https://swcomanda.com verso localhost
+// indipendentemente dal CORS generico già presente.
+// Senza questo header: banner sempre "offline", comande mai ricevute.
+// ─────────────────────────────────────────────────────────────────────────────
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
   res.header("Access-Control-Allow-Headers", "Content-Type");
   res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.header("Access-Control-Allow-Private-Network", "true"); // ← fix PNA
   if (req.method === "OPTIONS") return res.sendStatus(200);
   next();
 });
@@ -26,11 +75,62 @@ app.use(express.json({ limit: "10mb" }));
 app.get("/status", (req, res) => {
   res.json({
     status: "ok",
-    version: "1.1.0",
+    version: "1.2.0",
     printCount: status.printCount,
     lastPrint: status.lastPrint,
     timestamp: new Date().toISOString(),
   });
+});
+
+/**
+ * GET /scan-network?base=192.168.1&start=1&end=50&port=9100&timeout=500
+ * Scansiona un range di IP alla ricerca di stampanti ESC/POS raggiungibili via TCP.
+ * Eseguito in batch da 10 IP paralleli per non saturare la rete.
+ *
+ * Risposta: { discovered: [{ ip, port }, ...] }
+ */
+app.get("/scan-network", async (req, res) => {
+  const { base, start, end, port = "9100", timeout = "500" } = req.query;
+  if (!base || !start || !end) {
+    return res.status(400).json({ error: "base, start, end obbligatori" });
+  }
+
+  const from = parseInt(start);
+  const to = parseInt(end);
+  const tcpPort = parseInt(port);
+  const tcpTimeout = parseInt(timeout);
+
+  if (isNaN(from) || isNaN(to) || isNaN(tcpPort) || to < from || to - from > 254) {
+    return res.status(400).json({ error: "Parametri non validi" });
+  }
+
+  console.log(`🔍 Scan rete ${base}.${from}–${base}.${to}:${tcpPort}`);
+
+  const probe = (ip) =>
+    new Promise((resolve) => {
+      const sock = new net.Socket();
+      sock.setTimeout(tcpTimeout);
+      sock.connect(tcpPort, ip, () => {
+        sock.destroy();
+        resolve({ ip, port: tcpPort });
+      });
+      sock.on("error", () => resolve(null));
+      sock.on("timeout", () => { sock.destroy(); resolve(null); });
+    });
+
+  const discovered = [];
+  const BATCH = 10;
+  for (let i = from; i <= to; i += BATCH) {
+    const batch = [];
+    for (let j = i; j < Math.min(i + BATCH, to + 1); j++) {
+      batch.push(probe(`${base}.${j}`));
+    }
+    const results = await Promise.all(batch);
+    discovered.push(...results.filter(Boolean));
+  }
+
+  console.log(`✅ Scan completato: ${discovered.length} stampant${discovered.length === 1 ? "e" : "i"} trovat${discovered.length === 1 ? "a" : "e"}`);
+  res.json({ discovered });
 });
 
 /**
@@ -57,6 +157,33 @@ app.get("/test-printer", (req, res) => {
       console.log(`❌ ${ip}:${tcpPort} non raggiungibile — ${err.message}`);
       res.json({ reachable: false, error: err.message });
     });
+});
+
+// ── POST /configure (#161) ─────────────────────────────────────
+// Riceve credenziali Supabase dalla PWA e avvia il polling autonomo.
+// Payload: { supabase_url, supabase_anon_key, restaurant_id, device_id,
+//            access_token, refresh_token }
+app.post("/configure", (req, res) => {
+  const { supabase_url, supabase_anon_key, restaurant_id, device_id, access_token, refresh_token } = req.body;
+
+  if (!supabase_url || !supabase_anon_key || !restaurant_id || !device_id || !access_token || !refresh_token) {
+    return res.status(400).json({ error: "Campi obbligatori mancanti" });
+  }
+
+  const config = {
+    supabaseUrl:     supabase_url,
+    supabaseAnonKey: supabase_anon_key,
+    restaurantId:    restaurant_id,
+    deviceId:        device_id,
+    accessToken:     access_token,
+    refreshToken:    refresh_token,
+  };
+
+  saveConfig(config);
+  startPollLoop(config);
+
+  console.log(`✅ /configure OK — restaurant=${restaurant_id} device=${device_id}`);
+  res.json({ success: true });
 });
 
 app.post("/print", async (req, res) => {
@@ -169,7 +296,15 @@ function sendToPrinter(ip, port, data) {
 function startServer() {
   return new Promise((resolve, reject) => {
     server = app.listen(PORT, "0.0.0.0", () => {
-      console.log(`\n🖨️  MyPos Print Agent v1.1.0 attivo su http://localhost:${PORT}\n`);
+      console.log(`\n🖨️  MyPos Print Agent v1.2.0 attivo su http://localhost:${PORT}\n`);
+
+      // #161 — Riprendi il polling se il PC era già stato configurato (riavvio)
+      const savedConfig = loadConfig();
+      if (savedConfig) {
+        console.log("[Config] Configurazione Supabase trovata — avvio poll loop automatico");
+        startPollLoop(savedConfig);
+      }
+
       resolve();
     });
     server.on("error", (err) => {
@@ -183,6 +318,7 @@ function startServer() {
 }
 
 function stopServer() {
+  pollWorker.stop();
   if (server) {
     server.close();
     server = null;
@@ -191,7 +327,7 @@ function stopServer() {
 }
 
 function getStatus() {
-  return { ...status };
+  return { ...status, pollLoopRunning: pollWorker.isRunning() };
 }
 
 module.exports = { startServer, stopServer, getStatus };
