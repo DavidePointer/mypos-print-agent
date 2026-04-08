@@ -15,10 +15,31 @@ const http   = require('http');
 const net    = require('net');
 const sharp  = require('sharp');
 const fs     = require('fs');
+const path   = require('path');
+const os     = require('os');
 
 const HEARTBEAT_INTERVAL_MS = 10_000;
 const WATCHDOG_THRESHOLD_S  = 30;
 const LOG_FILE              = 'C:\\Users\\david\\poll-debug.txt';
+
+// ── Config persistence (speculare a server.js) ────────────────────
+// Necessario per aggiornare accessToken + refreshToken su disco
+// dopo ogni JWT refresh, senza dipendenza circolare da server.js.
+
+const CONFIG_PATH = path.join(
+  process.env.APPDATA || os.homedir(),
+  'ComandaPrintAgent',
+  'supabase-config.json'
+);
+
+function saveConfig(config) {
+  try {
+    fs.mkdirSync(path.dirname(CONFIG_PATH), { recursive: true });
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify(config), 'utf8');
+  } catch (e) {
+    log(`[Config] Salvataggio fallito: ${e.message}`);
+  }
+}
 
 // ── Logger su file ────────────────────────────────────────────────
 
@@ -95,6 +116,91 @@ function supabaseRequest(config, method, urlPath, body = null) {
   });
 }
 
+// ── JWT Refresh (#161) ────────────────────────────────────────────
+// Chiamato da fetchJobs quando riceve HTTP 401.
+// Usa /auth/v1/token?grant_type=refresh_token con il refreshToken corrente.
+// Aggiorna _config in memoria e persiste su disco.
+// Restituisce true se il refresh è riuscito, false altrimenti.
+
+async function refreshJwt() {
+  if (!_config || !_config.refreshToken) {
+    log('[refreshJwt] refreshToken mancante — impossibile rinnovare JWT');
+    return false;
+  }
+
+  log('[refreshJwt] accessToken scaduto — tentativo refresh...');
+
+  return new Promise((resolve) => {
+    let url;
+    try {
+      url = new URL(_config.supabaseUrl + '/auth/v1/token?grant_type=refresh_token');
+    } catch (e) {
+      log(`[refreshJwt] URL non valido: ${e.message}`);
+      return resolve(false);
+    }
+
+    const isHttps = url.protocol === 'https:';
+    const mod     = isHttps ? https : http;
+
+    const bodyStr = JSON.stringify({ refresh_token: _config.refreshToken });
+    const headers = {
+      'apikey':         _config.supabaseAnonKey,
+      'Content-Type':   'application/json',
+      'Content-Length': Buffer.byteLength(bodyStr),
+    };
+
+    const req = mod.request(
+      {
+        hostname: url.hostname,
+        port:     url.port || (isHttps ? 443 : 80),
+        path:     url.pathname + url.search,
+        method:   'POST',
+        headers,
+        timeout: 10_000,
+      },
+      (res) => {
+        let data = '';
+        res.on('data', (chunk) => { data += chunk; });
+        res.on('end', () => {
+          log(`[refreshJwt] HTTP ${res.statusCode}, body.length=${data.length}`);
+          if (res.statusCode !== 200) {
+            log(`[refreshJwt] ❌ refresh fallito — body: ${data.substring(0, 300)}`);
+            return resolve(false);
+          }
+
+          let parsed;
+          try {
+            parsed = JSON.parse(data);
+          } catch (e) {
+            log(`[refreshJwt] errore parsing risposta: ${e.message}`);
+            return resolve(false);
+          }
+
+          if (!parsed.access_token || !parsed.refresh_token) {
+            log(`[refreshJwt] risposta incompleta — campi mancanti: ${Object.keys(parsed).join(', ')}`);
+            return resolve(false);
+          }
+
+          // Aggiorna _config in memoria
+          _config.accessToken  = parsed.access_token;
+          _config.refreshToken = parsed.refresh_token;
+
+          // Persisti su disco
+          saveConfig(_config);
+
+          log('[refreshJwt] ✅ JWT rinnovato — accessToken aggiornato in memoria e su disco');
+          resolve(true);
+        });
+      }
+    );
+
+    req.on('error',   (e) => { log(`[refreshJwt] ERRORE rete: ${e.message}`); resolve(false); });
+    req.on('timeout', ()  => { req.destroy(); log('[refreshJwt] TIMEOUT 10s'); resolve(false); });
+    req.write(bodyStr);
+    req.end();
+  });
+}
+
 // ── Fetch jobs ───────────────────────────────────────────────────
 
 async function fetchJobs(config) {
@@ -118,7 +224,22 @@ async function fetchJobs(config) {
 
   for (const [label, p] of [['pending', pendingPath], ['stale', stalePath]]) {
     try {
-      const res = await supabaseRequest(config, 'GET', p);
+      let res = await supabaseRequest(config, 'GET', p);
+
+      // ── JWT refresh automatico su 401 ────────────────────────────
+      if (res.statusCode === 401) {
+        log(`[fetchJobs] 401 su query "${label}" — avvio refresh JWT`);
+        const refreshed = await refreshJwt();
+        if (refreshed) {
+          // Riprova la query con il nuovo accessToken (ora in _config)
+          log(`[fetchJobs] retry query "${label}" con nuovo token`);
+          res = await supabaseRequest(_config, 'GET', p);
+        } else {
+          log(`[fetchJobs] refresh fallito — skip query "${label}"`);
+          continue;
+        }
+      }
+
       if (res.statusCode === 200) {
         let jobs;
         try {
@@ -186,7 +307,8 @@ async function claimJob(config, jobId) {
     );
     const cr = res.headers['content-range'] || '';
     log(`[claimJob] watchdog — HTTP ${res.statusCode}, content-range: "${cr}"`);
-    if (res.statusCode >= 400) log(`[claimJob] watchdog errore body: ${res.body}`);    if (cr.includes('/1')) return true;
+    if (res.statusCode >= 400) log(`[claimJob] watchdog errore body: ${res.body}`);
+    if (cr.includes('/1')) return true;
   } catch (e) {
     log(`[claimJob] eccezione watchdog job ${jobId}: ${e.message}`);
   }
